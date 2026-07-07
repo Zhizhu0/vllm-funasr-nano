@@ -1,20 +1,25 @@
 name: Build and Save FunASR Image
 
-on: [workflow_dispatch] # 允许你在 GitHub 页面上手动点击运行
+on: [workflow_dispatch]
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # 【新增步骤】先清理虚拟机硬盘，腾出 30GB+ 空间
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          docker image prune --all --force
+          df -h # 打印硬盘情况，确认空间已经释放
+
       - name: Pull and Bake Model
         run: |
-          # 1. 云端服务器极速拉取 10GB 基础镜像（只需几十秒）
           docker pull registry.cn-hangzhou.aliyuncs.com/funasr_repo/funasr:funasr-runtime-sdk-gpu-0.2.0
-          
-          # 2. 运行并自动下载模型到容器内
           docker run --name temp_funasr registry.cn-hangzhou.aliyuncs.com/funasr_repo/funasr:funasr-runtime-sdk-gpu-0.2.0 python -c "from funasr import AutoModel; AutoModel(model='FunAudioLLM/Fun-ASR-Nano-2512', device='cpu')"
-          
-          # 3. 提交为全包新镜像并压缩
           docker commit temp_funasr funasr-nano-all-in-one:latest
           docker save funasr-nano-all-in-one:latest | gzip > funasr_all_in_one.tar.gz
 
