@@ -29,20 +29,45 @@ jobs:
         run: |
           docker pull vllm/vllm-openai:latest
 
-      # 4. 运行临时容器：安装依赖、拉取源码、下载模型并固化双重服务启动脚本
-      - name: Install FunASR & Download Model & Create Entrypoint
+      # 4. 在 Runner 本地准备 FunASR 源码和启动脚本（规避容器内缺少 git 以及字符转义问题）
+      - name: Prepare Sources & Script on Runner
         run: |
-          docker run --name temp_funasr --entrypoint "" vllm/vllm-openai:latest bash -c " \
-            pip install --no-cache-dir funasr fastapi uvicorn python-multipart websockets && \
-            python3 -c \"from funasr import AutoModel; AutoModel(model='FunAudioLLM/Fun-ASR-Nano-2512', device='cpu')\" && \
-            mkdir -p /app && \
-            git clone --depth 1 https://github.com/modelscope/FunASR.git /app/FunASR && \
-            ln -sf /app/FunASR/client_mic.html /app/FunASR/index.html && \
-            printf '#\\!/bin/bash\ncd /app/FunASR\npython3 -m http.server 8000 &\nexec python3 examples/industrial_data_pretraining/fun_asr_nano/serve_realtime_ws.py --port 10095 --language 中文\n' > /app/start.sh && \
-            chmod +x /app/start.sh \
-          "
+          # 4.1 拉取 FunASR 源码
+          git clone --depth 1 https://github.com/modelscope/FunASR.git ./FunASR
+          
+          # 4.2 创建启动脚本
+          cat << 'EOF' > ./start.sh
+#!/bin/bash
+cd /app/FunASR
+# 启动静态 Web 服务，供外部通过浏览器访问页面
+python3 -m http.server 8000 &
+# 启动 FunASR WebSocket 实时语音转写服务
+exec python3 examples/industrial_data_pretraining/fun_asr_nano/serve_realtime_ws.py --port 10095 --language 中文
+EOF
+          chmod +x ./start.sh
 
-      # 5. 将容器打包为新镜像并进行“分片压缩”（使用刚刚编写的 /app/start.sh 作为 ENTRYPOINT）
+      # 5. 启动临时容器并配置环境（拷贝文件、安装依赖、预下载模型等）
+      - name: Build Container Environment
+        run: |
+          # 5.1 启动容器并让其常驻后台
+          docker run -d --name temp_funasr --entrypoint "" vllm/vllm-openai:latest sleep infinity
+          
+          # 5.2 创建目标目录并复制源码、启动脚本到容器内
+          docker exec temp_funasr mkdir -p /app
+          docker cp ./FunASR temp_funasr:/app/FunASR
+          docker cp ./start.sh temp_funasr:/app/start.sh
+          
+          # 5.3 在容器内配置软链接、安装 Python 依赖和下载模型
+          docker exec temp_funasr bash -c '
+            ln -sf /app/FunASR/client_mic.html /app/FunASR/index.html && \
+            pip install --no-cache-dir funasr fastapi uvicorn python-multipart websockets && \
+            python3 -c "from funasr import AutoModel; AutoModel(model=\"FunAudioLLM/Fun-ASR-Nano-2512\", device=\"cpu\")"
+          '
+          
+          # 5.4 停止容器，以便后续打包
+          docker stop temp_funasr
+
+      # 6. 将容器打包为新镜像并进行“分片压缩”
       - name: Commit and Compress Image
         run: |
           docker commit \
@@ -51,7 +76,7 @@ jobs:
             --change 'ENTRYPOINT ["/app/start.sh"]' \
             temp_funasr funasr-nano-all-in-one:latest
           
-          # 用 -1 模式极速压缩（1~2 分钟）
+          # 用 -1 模式极速压缩
           docker save funasr-nano-all-in-one:latest | gzip -1 > funasr_all_in_one.tar.gz
           
           # 将大文件切割为 1.5G 每一个的小分片
@@ -60,7 +85,7 @@ jobs:
           # 删除原本的大压缩包以释放虚拟机硬盘空间
           rm -f funasr_all_in_one.tar.gz
 
-      # 6. 上传切片文件到 GitHub Releases
+      # 7. 上传切片文件到 GitHub Releases
       - name: Upload to Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
