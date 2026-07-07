@@ -25,9 +25,10 @@ jobs:
       - name: Install FunASR & Download Model
         run: |
           # 使用 --entrypoint "" 覆盖原有的 vllm 默认启动，确保可以进入 bash 执行安装
+          # 这里将 python -c 修改为了 python3 -c
           docker run --name temp_funasr --entrypoint "" vllm/vllm-openai:latest bash -c " \
             pip install --no-cache-dir funasr fastapi uvicorn python-multipart && \
-            python -c \"from funasr import AutoModel; AutoModel(model='FunAudioLLM/Fun-ASR-Nano-2512', device='cpu')\" \
+            python3 -c \"from funasr import AutoModel; AutoModel(model='FunAudioLLM/Fun-ASR-Nano-2512', device='cpu')\" \
           "
 
       # 4. 将容器打包为新镜像（并注入环境变量和启动命令）
