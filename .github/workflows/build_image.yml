@@ -47,19 +47,19 @@ jobs:
           # 用 -1 模式极速压缩（1~2 分钟）
           docker save funasr-nano-all-in-one:latest | gzip -1 > funasr_all_in_one.tar.gz
           
-          # 【核心修改】将大文件切割为 1.5G 每一个的小分片
-          # 切割后会生成：funasr_all_in_one.tar.gz.part00, funasr_all_in_one.tar.gz.part01...
+          # 将大文件切割为 1.5G 每一个的小分片
           split -b 1500M -d funasr_all_in_one.tar.gz funasr_all_in_one.tar.gz.part
           
           # 删除原本的 10G 大文件，防止硬盘塞满，只保留分片
           rm -f funasr_all_in_one.tar.gz
 
-      # 5. 上传切片文件到 GitHub Release 页面发布
+      # 5. 上传切片文件（改用 GitHub 官方原生极速命令行，彻底解决上传卡死、取消问题）
       - name: Upload to Release
-        uses: softprops/action-gh-release@v1
-        with:
-          # 使用通配符 * 一键上传所有的分片文件
-          files: funasr_all_in_one.tar.gz.part*
-          tag_name: v1.0.0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 传入官方内置 Token
+        run: |
+          # 使用官方 gh release 命令行，--clobber 允许覆盖已有的 Release，防止重跑报错
+          gh release create v1.0.0 funasr_all_in_one.tar.gz.part* \
+            --title "v1.0.0" \
+            --notes "Offline FunASR vLLM Image Parts" \
+            --clobber
