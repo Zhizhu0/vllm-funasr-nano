@@ -1,0 +1,27 @@
+name: Build and Save FunASR Image
+
+on: [workflow_dispatch] # 允许你在 GitHub 页面上手动点击运行
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull and Bake Model
+        run: |
+          # 1. 云端服务器极速拉取 10GB 基础镜像（只需几十秒）
+          docker pull registry.cn-hangzhou.aliyuncs.com/funasr_repo/funasr:funasr-runtime-sdk-gpu-0.2.0
+          
+          # 2. 运行并自动下载模型到容器内
+          docker run --name temp_funasr registry.cn-hangzhou.aliyuncs.com/funasr_repo/funasr:funasr-runtime-sdk-gpu-0.2.0 python -c "from funasr import AutoModel; AutoModel(model='FunAudioLLM/Fun-ASR-Nano-2512', device='cpu')"
+          
+          # 3. 提交为全包新镜像并压缩
+          docker commit temp_funasr funasr-nano-all-in-one:latest
+          docker save funasr-nano-all-in-one:latest | gzip > funasr_all_in_one.tar.gz
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: funasr_all_in_one.tar.gz
+          tag_name: v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
