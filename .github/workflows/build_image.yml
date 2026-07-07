@@ -1,12 +1,12 @@
 name: Build and Save FunASR Image
 
-on: [workflow_dispatch]
+on: [workflow_dispatch] # 允许手动在 GitHub 页面上点击运行
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 【新增步骤】先清理虚拟机硬盘，腾出 30GB+ 空间
+      # 1. 彻底清理虚拟机硬盘（瞬间腾出 30GB+ 空间，防止硬盘爆满）
       - name: Free Disk Space
         run: |
           sudo rm -rf /usr/share/dotnet
@@ -14,15 +14,37 @@ jobs:
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache/CodeQL
           docker image prune --all --force
-          df -h # 打印硬盘情况，确认空间已经释放
+          df -h # 打印硬盘使用情况
 
-      - name: Pull and Bake Model
+      # 2. 极速拉取 Docker Hub 的官方 vllm 基础镜像（海外互联，30 秒以内即可拉完，绝不卡死！）
+      - name: Pull Base Image
         run: |
-          docker pull registry.cn-hangzhou.aliyuncs.com/funasr_repo/funasr:funasr-runtime-sdk-gpu-0.2.0
-          docker run --name temp_funasr registry.cn-hangzhou.aliyuncs.com/funasr_repo/funasr:funasr-runtime-sdk-gpu-0.2.0 python -c "from funasr import AutoModel; AutoModel(model='FunAudioLLM/Fun-ASR-Nano-2512', device='cpu')"
-          docker commit temp_funasr funasr-nano-all-in-one:latest
+          docker pull vllm/vllm-openai:latest
+
+      # 3. 运行临时容器：在里面安装 funasr 并且自动把模型下载到容器里
+      - name: Install FunASR & Download Model
+        run: |
+          # 使用 --entrypoint "" 覆盖原有的 vllm 默认启动，确保可以进入 bash 执行安装
+          docker run --name temp_funasr --entrypoint "" vllm/vllm-openai:latest bash -c " \
+            pip install --no-cache-dir funasr fastapi uvicorn python-multipart && \
+            python -c \"from funasr import AutoModel; AutoModel(model='FunAudioLLM/Fun-ASR-Nano-2512', device='cpu')\" \
+          "
+
+      # 4. 将容器打包为新镜像（并注入环境变量和启动命令）
+      - name: Commit and Compress Image
+        run: |
+          # 使用 --change 把完全离线环境变量、启动命令、默认接口写入镜像中
+          docker commit \
+            --change 'ENV MODELSCOPE_OFFLINE=1' \
+            --change 'ENV HF_HUB_OFFLINE=1' \
+            --change 'ENTRYPOINT []' \
+            --change 'CMD ["funasr-server", "--device", "cuda"]' \
+            temp_funasr funasr-nano-all-in-one:latest
+          
+          # 保存为 tar 包并进行高比例的 gzip 压缩（减小体积）
           docker save funasr-nano-all-in-one:latest | gzip > funasr_all_in_one.tar.gz
 
+      # 5. 上传压缩包到 GitHub Release 页面发布
       - name: Upload to Release
         uses: softprops/action-gh-release@v1
         with:
