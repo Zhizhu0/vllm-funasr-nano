@@ -2,7 +2,7 @@ name: Build and Save FunASR Image
 
 on: [workflow_dispatch] # 允许手动在 GitHub 页面上点击运行
 
-# 【核心修复 1】显式声明工作流拥有写入权限，允许发布 Release 和上传大文件
+# 声明工作流拥有写入权限
 permissions:
   contents: write
 
@@ -20,7 +20,7 @@ jobs:
           docker image prune --all --force
           df -h # 打印硬盘使用情况
 
-      # 2. 极速拉取 Docker Hub 的官方 vllm 基础镜像（海外拉取 30 秒以内，绝不卡死！）
+      # 2. 极速拉取 Docker Hub 的官方 vllm 基础镜像（30 秒以内即可拉完，绝不卡死！）
       - name: Pull Base Image
         run: |
           docker pull vllm/vllm-openai:latest
@@ -28,16 +28,15 @@ jobs:
       # 3. 运行临时容器：在里面安装 funasr 并且自动把模型下载到容器里
       - name: Install FunASR & Download Model
         run: |
-          # 使用 --entrypoint "" 覆盖原有的 vllm 默认启动，确保可以进入 bash 执行安装
           docker run --name temp_funasr --entrypoint "" vllm/vllm-openai:latest bash -c " \
             pip install --no-cache-dir funasr fastapi uvicorn python-multipart && \
             python3 -c \"from funasr import AutoModel; AutoModel(model='FunAudioLLM/Fun-ASR-Nano-2512', device='cpu')\" \
           "
 
-      # 4. 将容器打包为新镜像（并注入环境变量和启动命令）
+      # 4. 将容器打包为新镜像并进行“分片压缩”
       - name: Commit and Compress Image
         run: |
-          # 使用 --change 把完全离线环境变量、启动命令、默认接口写入镜像中
+          # 提交修改
           docker commit \
             --change 'ENV MODELSCOPE_OFFLINE=1' \
             --change 'ENV HF_HUB_OFFLINE=1' \
@@ -45,14 +44,22 @@ jobs:
             --change 'CMD ["funasr-server", "--device", "cuda"]' \
             temp_funasr funasr-nano-all-in-one:latest
           
-          # 【核心修复 2】使用 -1 极速压缩模式，速度提升 10 倍以上，告别漫长等待
+          # 用 -1 模式极速压缩（1~2 分钟）
           docker save funasr-nano-all-in-one:latest | gzip -1 > funasr_all_in_one.tar.gz
+          
+          # 【核心修改】将大文件切割为 1.5G 每一个的小分片
+          # 切割后会生成：funasr_all_in_one.tar.gz.part00, funasr_all_in_one.tar.gz.part01...
+          split -b 1500M -d funasr_all_in_one.tar.gz funasr_all_in_one.tar.gz.part
+          
+          # 删除原本的 10G 大文件，防止硬盘塞满，只保留分片
+          rm -f funasr_all_in_one.tar.gz
 
-      # 5. 上传压缩包到 GitHub Release 页面发布
+      # 5. 上传切片文件到 GitHub Release 页面发布
       - name: Upload to Release
         uses: softprops/action-gh-release@v1
         with:
-          files: funasr_all_in_one.tar.gz
+          # 使用通配符 * 一键上传所有的分片文件
+          files: funasr_all_in_one.tar.gz.part*
           tag_name: v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
