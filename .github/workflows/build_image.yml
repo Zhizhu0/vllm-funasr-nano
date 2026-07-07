@@ -53,13 +53,12 @@ jobs:
           # 删除原本的 10G 大文件，防止硬盘塞满，只保留分片
           rm -f funasr_all_in_one.tar.gz
 
-      # 5. 上传切片文件（改用 GitHub 官方原生极速命令行，彻底解决上传卡死、取消问题）
+      # 5. 上传切片文件（使用运行次数作为动态递增 Tag，如 v1.0.1, v1.0.2...）
       - name: Upload to Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 传入官方内置 Token
         run: |
-          # 使用官方 gh release 命令行，--clobber 允许覆盖已有的 Release，防止重跑报错
-          gh release create v1.0.0 funasr_all_in_one.tar.gz.part* \
-            --title "v1.0.0" \
-            --notes "Offline FunASR vLLM Image Parts" \
-            --clobber
+          # 使用 ${{ github.run_number }} 动态递增版本号，每次运行自动 +1
+          gh release create "v1.0.${{ github.run_number }}" funasr_all_in_one.tar.gz.part* \
+            --title "v1.0.${{ github.run_number }}" \
+            --notes "Offline FunASR vLLM Image Parts - Run ${{ github.run_number }}"
