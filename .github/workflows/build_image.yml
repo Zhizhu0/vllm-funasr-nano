@@ -10,7 +10,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. 彻底清理虚拟机硬盘（瞬间腾出 30GB+ 空间，防止硬盘爆满）
+      # 1. 彻底清理虚拟机硬盘（腾出空间，防止硬盘爆满）
       - name: Free Disk Space
         run: |
           sudo rm -rf /usr/share/dotnet
@@ -18,34 +18,37 @@ jobs:
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache/CodeQL
           docker image prune --all --force
-          df -h # 打印硬盘使用情况
+          df -h
 
-      # 【新增核心步骤】拉取仓库代码，初始化 .git 目录（耗时不到 1 秒，彻底解决 gh 报错）
+      # 2. 拉取仓库代码，初始化 .git 目录（解决 gh 报错）
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. 极速拉取 Docker Hub 的官方 vllm 基础镜像（30 秒以内即可拉完，绝不卡死！）
+      # 3. 拉取 Docker Hub 的官方 vllm 基础镜像
       - name: Pull Base Image
         run: |
           docker pull vllm/vllm-openai:latest
 
-      # 3. 运行临时容器：在里面安装 funasr 并且自动把模型下载到容器里
-      - name: Install FunASR & Download Model
+      # 4. 运行临时容器：安装依赖、拉取源码、下载模型并固化双重服务启动脚本
+      - name: Install FunASR & Download Model & Create Entrypoint
         run: |
           docker run --name temp_funasr --entrypoint "" vllm/vllm-openai:latest bash -c " \
-            pip install --no-cache-dir funasr fastapi uvicorn python-multipart && \
-            python3 -c \"from funasr import AutoModel; AutoModel(model='FunAudioLLM/Fun-ASR-Nano-2512', device='cpu')\" \
+            pip install --no-cache-dir funasr fastapi uvicorn python-multipart websockets && \
+            python3 -c \"from funasr import AutoModel; AutoModel(model='FunAudioLLM/Fun-ASR-Nano-2512', device='cpu')\" && \
+            mkdir -p /app && \
+            git clone --depth 1 https://github.com/modelscope/FunASR.git /app/FunASR && \
+            ln -sf /app/FunASR/client_mic.html /app/FunASR/index.html && \
+            printf '#\\!/bin/bash\ncd /app/FunASR\npython3 -m http.server 8000 &\nexec python3 examples/industrial_data_pretraining/fun_asr_nano/serve_realtime_ws.py --port 10095 --language 中文\n' > /app/start.sh && \
+            chmod +x /app/start.sh \
           "
 
-      # 4. 将容器打包为新镜像并进行“分片压缩”
+      # 5. 将容器打包为新镜像并进行“分片压缩”（使用刚刚编写的 /app/start.sh 作为 ENTRYPOINT）
       - name: Commit and Compress Image
         run: |
-          # 提交修改
           docker commit \
             --change 'ENV MODELSCOPE_OFFLINE=1' \
             --change 'ENV HF_HUB_OFFLINE=1' \
-            --change 'ENTRYPOINT []' \
-            --change 'CMD ["funasr-server", "--device", "cuda"]' \
+            --change 'ENTRYPOINT ["/app/start.sh"]' \
             temp_funasr funasr-nano-all-in-one:latest
           
           # 用 -1 模式极速压缩（1~2 分钟）
@@ -54,15 +57,14 @@ jobs:
           # 将大文件切割为 1.5G 每一个的小分片
           split -b 1500M -d funasr_all_in_one.tar.gz funasr_all_in_one.tar.gz.part
           
-          # 删除原本的 10G 大文件，防止硬盘塞满，只保留分片
+          # 删除原本的大压缩包以释放虚拟机硬盘空间
           rm -f funasr_all_in_one.tar.gz
 
-      # 5. 上传切片文件（使用运行次数作为动态递增 Tag，如 v1.0.1, v1.0.2...）
+      # 6. 上传切片文件到 GitHub Releases
       - name: Upload to Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 传入官方内置 Token
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 使用 ${{ github.run_number }} 动态递增版本号，每次运行自动 +1
           gh release create "v1.0.${{ github.run_number }}" funasr_all_in_one.tar.gz.part* \
             --title "v1.0.${{ github.run_number }}" \
-            --notes "Offline FunASR vLLM Image Parts - Run ${{ github.run_number }}"
+            --notes "Offline FunASR vLLM Image with Web GUI - Run ${{ github.run_number }}"
