@@ -35,40 +35,58 @@ jobs:
           # 4.1 拉取 FunASR 源码
           git clone --depth 1 https://github.com/modelscope/FunASR.git ./FunASR
           
-          # 4.2 通过 echo 安全逐行创建启动脚本，规避 YAML 缩进语法限制
+          # 4.2 通过 echo 逐行创建启动脚本（彻底对齐离线环境）
           echo '#!/bin/bash' > ./start.sh
+          echo '# 1. 强制声明底层依赖完全离线' >> ./start.sh
+          echo 'export MODELSCOPE_OFFLINE=true' >> ./start.sh
+          echo 'export HF_HUB_OFFLINE=1' >> ./start.sh
+          echo 'export TRANSFORMERS_OFFLINE=1' >> ./start.sh
+          echo '' >> ./start.sh
+          echo '# 2. 启动网页静态服务器' >> ./start.sh
           echo 'cd /app/FunASR' >> ./start.sh
           echo 'python3 -m http.server 8000 &' >> ./start.sh
-          echo 'exec python3 examples/industrial_data_pretraining/fun_asr_nano/serve_realtime_ws.py --port 10095 --language 中文' >> ./start.sh
+          echo '' >> ./start.sh
+          echo '# 3. 启动实时转写服务（显式指定 --model 确保精确匹配缓存）' >> ./start.sh
+          echo 'exec python3 examples/industrial_data_pretraining/fun_asr_nano/serve_realtime_ws.py --port 10095 --model FunAudioLLM/Fun-ASR-Nano-2512 --language 中文' >> ./start.sh
           chmod +x ./start.sh
 
-      # 5. 启动临时容器并配置环境（包括拷贝源码、安装依赖、预下载模型等）
+      # 5. 启动临时容器并配置环境（包括拷贝源码、安装依赖、预下载 ASR 和 VAD、规避循环导入等）
       - name: Build Container Environment
         run: |
-          # 5.1 启动容器并让其常驻后台
-          docker run -d --name temp_funasr --entrypoint "" vllm/vllm-openai:latest sleep infinity
+          # 5.1 启动容器并让其常驻后台，同时通过环境变量指定全局缓存路径为 /app/model_cache
+          docker run -d --name temp_funasr --entrypoint "" \
+            -e MODELSCOPE_CACHE=/app/model_cache \
+            -e HF_HOME=/app/model_cache \
+            vllm/vllm-openai:latest sleep infinity
           
           # 5.2 复制源码和启动脚本到容器内
           docker exec temp_funasr mkdir -p /app
           docker cp ./FunASR temp_funasr:/app/FunASR
           docker cp ./start.sh temp_funasr:/app/start.sh
           
-          # 5.3 在容器内配置软链接、安装依赖和下载模型
-          docker exec temp_funasr bash -c '
+          # 5.3 在容器内配置环境
+          # 关键操作说明：
+          # 1) rm -rf /app/FunASR/funasr ：删除克隆仓库里冗余的 Python 包代码，确保运行时不发生本地导入冲突，直接使用全局 pip 安装的官方包包。
+          # 2) python3 -c "..." ：通过同时指定 model 和 vad_model，一次性在构建期拉取并固化 ASR 模型 (Fun-ASR-Nano) 和 VAD 模型 (fsmn-vad) 到 /app/model_cache 下。
+          docker exec -e MODELSCOPE_CACHE=/app/model_cache -e HF_HOME=/app/model_cache temp_funasr bash -c '
             ln -sf /app/FunASR/client_mic.html /app/FunASR/index.html && \
+            rm -rf /app/FunASR/funasr && \
             pip install --no-cache-dir funasr fastapi uvicorn python-multipart websockets && \
-            python3 -c "from funasr import AutoModel; AutoModel(model=\"FunAudioLLM/Fun-ASR-Nano-2512\", device=\"cpu\")"
+            python3 -c "from funasr import AutoModel; AutoModel(model=\"FunAudioLLM/Fun-ASR-Nano-2512\", vad_model=\"fsmn-vad\", device=\"cpu\")"
           '
           
-          # 5.4 停止容器，以便后续打包
+          # 5.4 停止容器，准备 commit
           docker stop temp_funasr
 
       # 6. 将容器打包为新镜像并进行“分片压缩”
       - name: Commit and Compress Image
         run: |
           docker commit \
-            --change 'ENV MODELSCOPE_OFFLINE=1' \
+            --change 'ENV MODELSCOPE_CACHE=/app/model_cache' \
+            --change 'ENV HF_HOME=/app/model_cache' \
+            --change 'ENV MODELSCOPE_OFFLINE=true' \
             --change 'ENV HF_HUB_OFFLINE=1' \
+            --change 'ENV TRANSFORMERS_OFFLINE=1' \
             --change 'ENTRYPOINT ["/app/start.sh"]' \
             temp_funasr funasr-nano-all-in-one:latest
           
@@ -88,4 +106,4 @@ jobs:
         run: |
           gh release create "v1.0.${{ github.run_number }}" funasr_all_in_one.tar.gz.part* \
             --title "v1.0.${{ github.run_number }}" \
-            --notes "Offline FunASR vLLM Image with Web GUI - Run ${{ github.run_number }}"
+            --notes "Strict Offline FunASR vLLM Image with Web GUI & VAD - Run ${{ github.run_number }}"
